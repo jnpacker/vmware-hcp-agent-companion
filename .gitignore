@@ -1,0 +1,43 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+testbin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+cover.out
+
+# Go workspace file
+go.work
+
+# Kubernetes Generated files - skip generated files, except for vendored files
+!vendor/**/zz_generated.*
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+
+# Build artifacts
+dist/
+release/
+
+# Secrets and credentials
+*secret*.yaml
+*credentials*.yaml
+!config/samples/vsphere-credentials.yaml
+config/manager/kustomization.yaml

@@ -1,0 +1,20 @@
+apiVersion: vmware.hcp.open-cluster-management.io/v1alpha1
+kind: VMwareNodePoolTemplate
+metadata:
+  name: example-minimal
+  namespace: default
+spec:
+  # Minimal required configuration
+  vmTemplate:
+    datacenter: "Datacenter1"
+    datastore: "datastore1"
+    network: "VM Network"
+    cluster: "Cluster1"
+
+  agentISO:
+    type: datastore
+    datastorePath: "[datastore1] iso/agent.iso"
+
+  # Test mode to validate configuration without NodePool
+  testMode: true
+  replicas: 1

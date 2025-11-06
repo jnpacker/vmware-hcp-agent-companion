@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmware-nodepool-controller 
+  labels:
+    app: vmware-nodepool-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vmware-nodepool-controller
+  template:
+    metadata:
+      labels:
+        app: vmware-nodepool-controller
+    spec:
+      serviceAccountName: vmware-nodepool-controller
+      containers:
+      - name: manager
+        image: quay.io/jpacker/vmware-hcp-agent-companion:0.2
+        imagePullPolicy: Always
+        command:
+        - /manager
+        args:
+        - --leader-elect
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10

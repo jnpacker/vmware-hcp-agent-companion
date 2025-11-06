@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmware-nodepool-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vmware-nodepool-controller-role
+rules:
+- apiGroups:
+  - vmware.hcp.open-cluster-management.io
+  resources:
+  - vmwarenodepooltemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - vmware.hcp.open-cluster-management.io
+  resources:
+  - vmwarenodepooltemplates/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - vmware.hcp.open-cluster-management.io
+  resources:
+  - vmwarenodepooltemplates/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - hypershift.openshift.io
+  resources:
+  - nodepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agent-install.openshift.io
+  resources:
+  - agents
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - hypershift.openshift.io
+  resources:
+  - hostedclusters
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vmware-nodepool-controller-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vmware-nodepool-controller-role
+subjects:
+- kind: ServiceAccount
+  name: vmware-nodepool-controller
+  namespace: multicluster-engine
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vmware-nodepool-leader-election-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vmware-nodepool-leader-election-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vmware-nodepool-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: vmware-nodepool-controller
