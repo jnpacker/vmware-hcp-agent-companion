@@ -1,0 +1,65 @@
+apiVersion: vmware.hcp.open-cluster-management.io/v1alpha1
+kind: VMwareNodePoolTemplate
+metadata:
+  name: example-full
+  namespace: clusters
+spec:
+  # Reference to NodePool (omit for test mode)
+  nodePoolRef:
+    name: my-nodepool
+    namespace: clusters
+
+  # vSphere credentials (optional, defaults to "vsphere-credentials" in same namespace)
+  vSphereCredentials:
+    name: vsphere-credentials
+    namespace: clusters
+
+  # VM Template Configuration
+  vmTemplate:
+    # Required fields
+    datacenter: "Datacenter1"
+    datastore: "datastore1"
+    network: "VM Network"
+    cluster: "Cluster1"
+
+    # Optional fields with custom values
+    numCPUs: 4
+    memoryMB: 8192
+    diskSizeGB: 200
+    guestID: "rhel8_64Guest"
+    firmware: "efi"
+    resourcePool: "MyResourcePool"
+    folder: "HCP-VMs"
+    namePrefix: "worker"
+
+    # Extra VMware configuration
+    extraConfig:
+      "guestinfo.ignition.config.data.encoding": "base64"
+
+    # Advanced VM configuration
+    advancedConfig:
+      # Enable UUID for virtual disks (required for Kubernetes storage)
+      diskEnableUUID: true
+      # Enable nested virtualization (hardware-assisted virtualization to guest OS)
+      # Default: true
+      nestedVirtualization: true
+
+  # Agent ISO Configuration - Option 1: Pre-configured datastore path
+  agentISO:
+    type: datastore
+    datastorePath: "[datastore1] iso/agent-rhcos-4.14.iso"
+
+  # Agent ISO Configuration - Option 2: Download from URL
+  # agentISO:
+  #   type: url
+  #   url: "https://mirror.example.com/pub/openshift/agent-rhcos-4.14.iso"
+  #   uploadedISOName: "agent-rhcos-4.14.iso"
+
+  # Labels to apply to discovered Agents for NodePool association
+  agentLabelSelector:
+    nodepool: "my-nodepool"
+    environment: "production"
+    cluster: "my-cluster"
+
+  # Test mode (set to false when using nodePoolRef)
+  testMode: false
