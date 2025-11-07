@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,6 +51,33 @@ var (
 		Kind:    "HostedCluster",
 	}
 )
+
+// isAgentUnbindingOrUnbound checks if an Agent is unbinding or unbound from a cluster
+func isAgentUnbindingOrUnbound(agent *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(agent.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+
+	// Check if any condition has reason "Unbinding" or "Unbound"
+	for _, condInterface := range conditions {
+		cond, ok := condInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		reason, found, err := unstructured.NestedString(cond, "reason")
+		if err != nil || !found {
+			continue
+		}
+
+		if reason == "Unbinding" || reason == "Unbound" {
+			return true
+		}
+	}
+
+	return false
+}
 
 // getAgentNamespace retrieves the agent namespace from the HostedCluster resource
 // The HostedCluster is in the same namespace as the VMwareNodePoolTemplate
@@ -183,6 +211,52 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			log.V(1).Info("Found matching Agent for VM by SerialNumber", "agent", agent.GetName(), "serial", agentSerial)
 		} else if agentUUID != "" && vmUUIDs[agentUUID] {
 			log.V(1).Info("Found matching Agent for VM by UUID", "agent", agent.GetName(), "uuid", agentUUID)
+		}
+
+		// Check if this Agent is unbinding/unbound - if so, delete it (finalizer will clean up VM)
+		if isAgentUnbindingOrUnbound(agent) {
+			// Safety check: Only delete if this agent belongs to our NodePool and was managed by us
+			labels := agent.GetLabels()
+			managedBy := ""
+			nodePoolLabel := ""
+			if labels != nil {
+				managedBy = labels["vmware.hcp.open-cluster-management.io/managed-by"]
+				nodePoolLabel = labels["vmware.hcp.open-cluster-management.io/nodepool"]
+			}
+
+			// Verify the agent was managed by this template
+			if managedBy != template.Name {
+				log.Info("Agent is unbinding but not managed by this template - skipping",
+					"agent", agent.GetName(), "managedBy", managedBy, "template", template.Name)
+				continue
+			}
+
+			// Verify the agent belonged to the referenced NodePool (if not in test mode)
+			if !template.Spec.TestMode && template.Spec.NodePoolRef != nil {
+				expectedNodePool := template.Spec.NodePoolRef.Name
+				if nodePoolLabel != expectedNodePool {
+					log.Info("Agent is unbinding but did not belong to our NodePool - skipping",
+						"agent", agent.GetName(), "agentNodePool", nodePoolLabel, "expectedNodePool", expectedNodePool)
+					continue
+				}
+			}
+
+			log.Info("Agent is unbinding/unbound and was managed by this template - deleting to trigger VM cleanup",
+				"agent", agent.GetName(), "nodepool", nodePoolLabel)
+
+			if err := r.Delete(ctx, agent); err != nil {
+				if !errors.IsNotFound(err) {
+					log.Error(err, "Failed to delete unbinding Agent", "agent", agent.GetName())
+					r.Recorder.Eventf(template, corev1.EventTypeWarning, "AgentDeletionFailed",
+						"Failed to delete unbinding Agent %s: %v", agent.GetName(), err)
+				}
+			} else {
+				log.Info("Deleted unbinding Agent - VM cleanup will proceed via finalizer", "agent", agent.GetName())
+				r.Recorder.Eventf(template, corev1.EventTypeNormal, "UnbindingAgentDeleted",
+					"Deleted unbinding Agent %s from NodePool %s (VM cleanup via finalizer)", agent.GetName(), nodePoolLabel)
+			}
+			// Skip further processing for this agent
+			continue
 		}
 
 		// Collect all updates in a single pass
