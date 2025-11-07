@@ -36,6 +36,8 @@ var (
 		Version: "v1beta1",
 		Kind:    "NodePool",
 	}
+	// Annotation to track NodePool connection on VMwareNodePoolTemplate
+	nodePoolRefAnnotation = "vmware.hcp.open-cluster-management.io/nodepool-ref"
 )
 
 // getNodePoolReplicas fetches the replica count from the referenced NodePool
@@ -98,4 +100,46 @@ func (r *VMwareNodePoolTemplateReconciler) getNodePool(ctx context.Context, temp
 	}
 
 	return nodePool, nil
+}
+
+// setNodePoolRefAnnotation adds or updates the NodePool reference annotation on the template
+// This annotation tracks which NodePool is connected to this template for visibility
+func (r *VMwareNodePoolTemplateReconciler) setNodePoolRefAnnotation(
+	ctx context.Context,
+	template *vmwarev1alpha1.VMwareNodePoolTemplate,
+	log logr.Logger,
+) error {
+	if template.Spec.NodePoolRef == nil {
+		// Remove annotation if no NodePool is referenced
+		annotations := template.GetAnnotations()
+		if annotations != nil && annotations[nodePoolRefAnnotation] != "" {
+			delete(annotations, nodePoolRefAnnotation)
+			template.SetAnnotations(annotations)
+			if err := r.Update(ctx, template); err != nil {
+				log.Error(err, "Failed to remove NodePool reference annotation")
+				return err
+			}
+			log.V(1).Info("Removed NodePool reference annotation")
+		}
+		return nil
+	}
+
+	// Set annotation with NodePool reference
+	annotations := template.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	nodePoolRef := fmt.Sprintf("%s/%s", template.Namespace, template.Spec.NodePoolRef.Name)
+	if annotations[nodePoolRefAnnotation] != nodePoolRef {
+		annotations[nodePoolRefAnnotation] = nodePoolRef
+		template.SetAnnotations(annotations)
+		if err := r.Update(ctx, template); err != nil {
+			log.Error(err, "Failed to set NodePool reference annotation")
+			return err
+		}
+		log.Info("Updated NodePool reference annotation", "nodePoolRef", nodePoolRef)
+	}
+
+	return nil
 }

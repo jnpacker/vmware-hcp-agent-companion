@@ -25,11 +25,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	vmwarev1alpha1 "github.com/example/vmware-hcp-agent-companion/api/v1alpha1"
 	"github.com/example/vmware-hcp-agent-companion/pkg/vsphere"
@@ -90,66 +86,18 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileVMs(ctx context.Context, vCl
 		}
 
 	} else if diff < 0 {
-		// Scale down: delete Agents (finalizers will handle VM cleanup)
+		// Scale down: VMs will be cleaned up when NodePool unbinds Agents
+		// The reconcileAgents function detects unbinding Agents and deletes them,
+		// which triggers the finalizer to clean up the corresponding VMs.
 		toDelete := -diff
-		log.Info("Scaling down", "current", currentReplicas, "desired", desiredReplicas, "toDelete", toDelete)
-		r.Recorder.Eventf(template, corev1.EventTypeNormal, "ScalingDown", "Scaling down by %d VMs", toDelete)
+		log.Info("Current VM count exceeds desired", "current", currentReplicas, "desired", desiredReplicas, "excess", toDelete)
+		log.Info("Waiting for NodePool to unbind Agents - unbinding Agents will be automatically cleaned up")
 
-		// Get the agent namespace
-		agentNamespace, err := r.getAgentNamespace(ctx, template, log)
-		if err != nil {
-			log.Error(err, "Failed to get agent namespace")
-			agentNamespace = template.Namespace
-		}
-
-		// Process VMs from the end (newest first)
-		for i := int32(0); i < toDelete && i < int32(len(currentVMs)); i++ {
-			vm := currentVMs[len(currentVMs)-1-int(i)]
-			agentName := vm.AgentName
-
-			if agentName == "" {
-				// No Agent associated - skip this VM
-				log.Info("No Agent associated with VM - skipping", "vm", vm.Name)
-				continue
-			}
-
-			// Get the Agent
-			agent := &unstructured.Unstructured{}
-			agent.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "agent-install.openshift.io",
-				Version: "v1beta1",
-				Kind:    "Agent",
-			})
-
-			if err := r.Get(ctx, client.ObjectKey{Name: agentName, Namespace: agentNamespace}, agent); err != nil {
-				if errors.IsNotFound(err) {
-					log.Info("Agent not found - already deleted", "agent", agentName, "vm", vm.Name)
-				} else {
-					log.Error(err, "Failed to get Agent for scale-down", "agent", agentName)
-				}
-				continue
-			}
-
-			// Delete the Agent (finalizer will handle VM cleanup)
-			log.Info("Deleting Agent (VM will be cleaned up by finalizer)", "agent", agentName, "vm", vm.Name)
-			if err := r.Delete(ctx, agent); err != nil {
-				if !errors.IsNotFound(err) {
-					log.Error(err, "Failed to delete Agent", "agent", agentName)
-					r.Recorder.Eventf(template, corev1.EventTypeWarning, "AgentDeletionFailed",
-						"Failed to delete Agent %s: %v", agentName, err)
-				}
-			} else {
-				log.Info("Deleted Agent", "agent", agentName)
-				r.Recorder.Eventf(template, corev1.EventTypeNormal, "AgentDeleted",
-					"Deleted Agent %s (VM cleanup via finalizer)", agentName)
-			}
-		}
-
-		// Refresh VM list
-		currentVMs, err = r.getCurrentVMs(ctx, vClient, template, log)
-		if err != nil {
-			return fmt.Errorf("failed to refresh VM list: %w", err)
-		}
+		// Note: We don't arbitrarily delete Agents here. Instead, we rely on:
+		// 1. NodePool controller marks Agents as Unbinding when scaling down
+		// 2. reconcileAgents() detects unbinding Agents and deletes them
+		// 3. Agent finalizer cleans up the corresponding VMs in vSphere
+		// This ensures we only delete VMs for Agents that were actually removed from the NodePool
 	}
 
 	// Update status with current VM information

@@ -54,6 +54,25 @@ const (
 )
 
 // VMwareNodePoolTemplateReconciler reconciles a VMwareNodePoolTemplate object
+//
+// IMPORTANT OPERATIONAL NOTES:
+//
+//  1. User-Defined Labels: If AgentLabelSelector is not defined correctly,
+//     agents won't match the NodePool. Ensure the labels in AgentLabelSelector
+//     are applied to discovered agents so they associate with the NodePool.
+//
+//  2. Missing NodePoolRef: In non-test mode, a nil NodePoolRef will cause
+//     reconciliation to fail and VMs will be scaled to 0. Always provide
+//     NodePoolRef when not in test mode.
+//
+//  3. Annotation Dependencies: VM cleanup relies on annotations being set
+//     during VM creation. Specifically, the template ownership annotation
+//     (guestinfo.vmware-hcp.template=namespace/template-name) must be present.
+//     If annotations are missing, VM deletion may fail.
+//
+//  4. Label Matching: The controller applies both user-defined labels
+//     (from AgentLabelSelector) AND management labels (vmware.hcp.open-cluster-management.io/managed-by).
+//     Ensure there are no conflicts between these label sets.
 type VMwareNodePoolTemplateReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -66,8 +85,7 @@ type VMwareNodePoolTemplateReconciler struct {
 // +kubebuilder:rbac:groups=vmware.hcp.open-cluster-management.io,resources=vmwarenodepooltemplates/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=nodepools,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=nodepools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=nodepools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=agents,verbs=get;list;watch;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop
@@ -253,6 +271,12 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileNormal(ctx context.Context, 
 	}
 
 	template.Status.DesiredReplicas = desiredReplicas
+
+	// Update annotation to track NodePool connection
+	if err := r.setNodePoolRefAnnotation(ctx, template, log); err != nil {
+		log.Error(err, "Failed to update NodePool reference annotation, but continuing reconciliation")
+		// Don't fail reconciliation on annotation errors
+	}
 
 	// Reconcile VMs
 	if err := r.reconcileVMs(ctx, vClient, template, log); err != nil {
