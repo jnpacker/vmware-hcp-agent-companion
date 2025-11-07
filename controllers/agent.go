@@ -213,50 +213,66 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			log.V(1).Info("Found matching Agent for VM by UUID", "agent", agent.GetName(), "uuid", agentUUID)
 		}
 
-		// Check if this Agent is unbinding/unbound - if so, delete it (finalizer will clean up VM)
+		// Check if this Agent is unbinding/unbound AND was previously managed by us
+		// We need to distinguish between:
+		// 1. NEW agents with "Unbound" status (never bound, no labels/annotations/finalizer)
+		// 2. MANAGED agents with "Unbinding"/"Unbound" status (were bound, have our markers)
 		if isAgentUnbindingOrUnbound(agent) {
-			// Safety check: Only delete if this agent belongs to our NodePool and was managed by us
 			labels := agent.GetLabels()
+
+			// Check if this agent has our management markers
+			hasFinalizer := controllerutil.ContainsFinalizer(agent, agentFinalizerName)
 			managedBy := ""
 			nodePoolLabel := ""
+
 			if labels != nil {
 				managedBy = labels["vmware.hcp.open-cluster-management.io/managed-by"]
 				nodePoolLabel = labels["vmware.hcp.open-cluster-management.io/nodepool"]
 			}
 
-			// Verify the agent was managed by this template
-			if managedBy != template.Name {
-				log.Info("Agent is unbinding but not managed by this template - skipping",
-					"agent", agent.GetName(), "managedBy", managedBy, "template", template.Name)
-				continue
-			}
-
-			// Verify the agent belonged to the referenced NodePool (if not in test mode)
-			if !template.Spec.TestMode && template.Spec.NodePoolRef != nil {
-				expectedNodePool := template.Spec.NodePoolRef.Name
-				if nodePoolLabel != expectedNodePool {
-					log.Info("Agent is unbinding but did not belong to our NodePool - skipping",
-						"agent", agent.GetName(), "agentNodePool", nodePoolLabel, "expectedNodePool", expectedNodePool)
+			// Only delete if agent has our management markers (finalizer + managed-by label)
+			// This distinguishes managed agents being unbound from NEW agents that are simply unbound
+			if hasFinalizer && managedBy != "" {
+				// Verify the agent was managed by this template
+				if managedBy != template.Name {
+					log.Info("Agent is unbinding but not managed by this template - skipping",
+						"agent", agent.GetName(), "managedBy", managedBy, "template", template.Name)
 					continue
 				}
-			}
 
-			log.Info("Agent is unbinding/unbound and was managed by this template - deleting to trigger VM cleanup",
-				"agent", agent.GetName(), "nodepool", nodePoolLabel)
-
-			if err := r.Delete(ctx, agent); err != nil {
-				if !errors.IsNotFound(err) {
-					log.Error(err, "Failed to delete unbinding Agent", "agent", agent.GetName())
-					r.Recorder.Eventf(template, corev1.EventTypeWarning, "AgentDeletionFailed",
-						"Failed to delete unbinding Agent %s: %v", agent.GetName(), err)
+				// Verify the agent belonged to the referenced NodePool (if not in test mode)
+				if !template.Spec.TestMode && template.Spec.NodePoolRef != nil {
+					expectedNodePool := template.Spec.NodePoolRef.Name
+					if nodePoolLabel != expectedNodePool {
+						log.Info("Agent is unbinding but did not belong to our NodePool - skipping",
+							"agent", agent.GetName(), "agentNodePool", nodePoolLabel, "expectedNodePool", expectedNodePool)
+						continue
+					}
 				}
+
+				log.Info("Agent is unbinding/unbound and was managed by this template - deleting to trigger VM cleanup",
+					"agent", agent.GetName(), "nodepool", nodePoolLabel)
+
+				if err := r.Delete(ctx, agent); err != nil {
+					if !errors.IsNotFound(err) {
+						log.Error(err, "Failed to delete unbinding Agent", "agent", agent.GetName())
+						r.Recorder.Eventf(template, corev1.EventTypeWarning, "AgentDeletionFailed",
+							"Failed to delete unbinding Agent %s: %v", agent.GetName(), err)
+					}
+				} else {
+					log.Info("Deleted unbinding Agent - VM cleanup will proceed via finalizer", "agent", agent.GetName())
+					r.Recorder.Eventf(template, corev1.EventTypeNormal, "UnbindingAgentDeleted",
+						"Deleted unbinding Agent %s from NodePool %s (VM cleanup via finalizer)", agent.GetName(), nodePoolLabel)
+				}
+				// Skip further processing for this agent
+				continue
 			} else {
-				log.Info("Deleted unbinding Agent - VM cleanup will proceed via finalizer", "agent", agent.GetName())
-				r.Recorder.Eventf(template, corev1.EventTypeNormal, "UnbindingAgentDeleted",
-					"Deleted unbinding Agent %s from NodePool %s (VM cleanup via finalizer)", agent.GetName(), nodePoolLabel)
+				// Agent is unbinding/unbound but doesn't have our markers
+				// This is likely a NEW agent that was never bound - process it normally
+				log.V(1).Info("Agent has unbinding/unbound status but no management markers - treating as new agent",
+					"agent", agent.GetName(), "hasFinalizer", hasFinalizer, "managedBy", managedBy)
+				// Fall through to normal processing
 			}
-			// Skip further processing for this agent
-			continue
 		}
 
 		// Collect all updates in a single pass
