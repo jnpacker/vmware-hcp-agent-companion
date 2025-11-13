@@ -52,6 +52,20 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileVMs(ctx context.Context, vCl
 		log.Info("Scaling up VMs", "current", currentReplicas, "desired", desiredReplicas, "toCreate", diff)
 		r.Recorder.Eventf(template, corev1.EventTypeNormal, "ScalingUp", "Creating %d new VMs", diff)
 
+		// If this is the first VM, add finalizer to the secret
+		if currentReplicas == 0 {
+			credNamespace := template.Namespace
+			credName := defaultCredentialSecretName
+			if template.Spec.VSphereCredentials != nil && template.Spec.VSphereCredentials.Name != "" {
+				credName = template.Spec.VSphereCredentials.Name
+			}
+
+			if err := r.ensureSecretFinalizer(ctx, credNamespace, credName, log); err != nil {
+				log.Error(err, "Failed to add finalizer to secret, but continuing with VM creation")
+				// Don't fail the reconciliation, just log the error
+			}
+		}
+
 		// Prepare ISO only when we need to create VMs
 		isoPath, err := r.prepareISO(ctx, vClient, template, log)
 		if err != nil {
@@ -64,7 +78,7 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileVMs(ctx context.Context, vCl
 		template.Status.ISOPath = isoPath
 
 		for i := int32(0); i < diff; i++ {
-			vmName := r.generateVMName(template, currentReplicas+i+1)
+			vmName := r.generateNextVMName(template, currentVMs)
 			if err := r.createVM(ctx, vClient, template, vmName, log); err != nil {
 				log.Error(err, "Failed to create VM", "vmName", vmName)
 				r.Recorder.Eventf(template, corev1.EventTypeWarning, "VMCreationFailed", "Failed to create VM %s: %v", vmName, err)
@@ -76,6 +90,9 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileVMs(ctx context.Context, vCl
 				if r.Metrics != nil {
 					r.Metrics.RecordVMCreated(template.Name, template.Namespace)
 				}
+
+				// Add the newly created VM to currentVMs so next iteration sees it
+				currentVMs = append(currentVMs, VMInfo{Name: vmName})
 			}
 		}
 
@@ -322,4 +339,32 @@ func (r *VMwareNodePoolTemplateReconciler) getVMNamePrefix(template *vmwarev1alp
 		return template.Spec.VMTemplate.NamePrefix
 	}
 	return template.Name
+}
+
+// generateNextVMName generates a unique VM name by finding the first available node number.
+// It parses existing VM names to identify used numbers and returns the lowest unused number.
+// This prevents collisions when VMs are deleted from the middle of the sequence.
+func (r *VMwareNodePoolTemplateReconciler) generateNextVMName(
+	template *vmwarev1alpha1.VMwareNodePoolTemplate,
+	currentVMs []VMInfo,
+) string {
+	prefix := r.getVMNamePrefix(template)
+
+	// Collect used node numbers
+	used := make(map[int32]bool)
+	for _, vm := range currentVMs {
+		var nodeNum int32
+		_, err := fmt.Sscanf(vm.Name, prefix+"-n%d", &nodeNum)
+		if err == nil {
+			used[nodeNum] = true
+		}
+	}
+
+	// Find first available number
+	nodeNum := int32(1)
+	for used[nodeNum] {
+		nodeNum++
+	}
+
+	return fmt.Sprintf("%s-n%02d", prefix, nodeNum)
 }

@@ -41,6 +41,7 @@ rules:
   verbs:
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - ""
@@ -57,6 +58,7 @@ rules:
   - get
   - list
   - watch
+  - update
 - apiGroups:
   - agent-install.openshift.io
   resources:

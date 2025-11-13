@@ -177,7 +177,7 @@ type VMwareNodePoolTemplateStatus struct {
 	// CurrentReplicas is the current number of VMs
 	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
 
-	// ReadyReplicas is the number of VMs that are ready
+	// ReadyReplicas is the number of VMs that are ready (powered on)
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
 	// VMStatus contains status information for each VM
