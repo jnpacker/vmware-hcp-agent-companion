@@ -43,7 +43,8 @@ import (
 )
 
 const (
-	finalizerName = "vmware.hcp.open-cluster-management.io/finalizer"
+	finalizerName       = "vmware.hcp.open-cluster-management.io/finalizer"
+	secretFinalizerName = "vmware.hcp.open-cluster-management.io/secret-in-use"
 
 	// Default credential secret name
 	defaultCredentialSecretName = "vsphere-credentials"
@@ -83,9 +84,9 @@ type VMwareNodePoolTemplateReconciler struct {
 // +kubebuilder:rbac:groups=vmware.hcp.open-cluster-management.io,resources=vmwarenodepooltemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=vmware.hcp.open-cluster-management.io,resources=vmwarenodepooltemplates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=vmware.hcp.open-cluster-management.io,resources=vmwarenodepooltemplates/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=nodepools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=nodepools,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=agent-install.openshift.io,resources=agents,verbs=get;list;watch;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop
@@ -257,7 +258,13 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileNormal(ctx context.Context, 
 				template.SetCondition(vmwarev1alpha1.ConditionTypeNodePoolFound, metav1.ConditionFalse,
 					"NodePoolDeleting", "NodePool is being deleted - cleaning up all resources")
 			} else {
-				// NodePool is healthy - get replicas
+				// NodePool is healthy - ensure matchLabels are configured
+				if err := r.ensureNodePoolMatchLabels(ctx, nodePool, template, log); err != nil {
+					log.Error(err, "Failed to ensure NodePool matchLabels", "error", err)
+					// Don't fail reconciliation, just log the error
+				}
+
+				// Get replicas
 				replicas, found, err := unstructured.NestedInt64(nodePool.Object, "spec", "replicas")
 				if err != nil || !found {
 					log.Error(err, "Failed to get replicas from NodePool")
@@ -396,8 +403,15 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileDelete(ctx context.Context, 
 		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
 	}
 
-	// All VMs have been deleted - remove finalizer
-	log.Info("All VMs deleted, removing finalizer")
+	// All VMs have been deleted - remove finalizer from secret
+	log.Info("All VMs deleted, removing secret finalizer")
+	if err := r.removeSecretFinalizer(ctx, credNamespace, credName, log); err != nil {
+		log.Error(err, "Failed to remove finalizer from secret, but continuing with template deletion")
+		// Don't fail the deletion, just log the error
+	}
+
+	// Remove finalizer from template
+	log.Info("Removing finalizer from template")
 	controllerutil.RemoveFinalizer(template, finalizerName)
 	if err := r.Update(ctx, template); err != nil {
 		return ctrl.Result{}, err
@@ -670,4 +684,55 @@ func (r *VMwareNodePoolTemplateReconciler) SetupWithManager(mgr ctrl.Manager) er
 	)
 
 	return builder.Complete(r)
+}
+
+// ensureSecretFinalizer adds the finalizer to the vSphere credentials secret
+func (r *VMwareNodePoolTemplateReconciler) ensureSecretFinalizer(ctx context.Context, credNamespace, credName string, log logr.Logger) error {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Namespace: credNamespace,
+		Name:      credName,
+	}, secret); err != nil {
+		return fmt.Errorf("failed to get secret for finalizer: %w", err)
+	}
+
+	// AddFinalizer only adds if not present and returns true if it made a change
+	if controllerutil.AddFinalizer(secret, secretFinalizerName) {
+		if err := r.Update(ctx, secret); err != nil {
+			return fmt.Errorf("failed to add finalizer to secret: %w", err)
+		}
+		log.Info("Added finalizer to vSphere credentials secret", "secret", credName, "namespace", credNamespace)
+	} else {
+		log.V(1).Info("Secret already has finalizer", "secret", credName, "namespace", credNamespace)
+	}
+
+	return nil
+}
+
+// removeSecretFinalizer removes the finalizer from the vSphere credentials secret
+func (r *VMwareNodePoolTemplateReconciler) removeSecretFinalizer(ctx context.Context, credNamespace, credName string, log logr.Logger) error {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Namespace: credNamespace,
+		Name:      credName,
+	}, secret); err != nil {
+		// If secret doesn't exist, nothing to do
+		if errors.IsNotFound(err) {
+			log.V(1).Info("Secret not found, cannot remove finalizer", "secret", credName, "namespace", credNamespace)
+			return nil
+		}
+		return fmt.Errorf("failed to get secret for finalizer removal: %w", err)
+	}
+
+	// RemoveFinalizer only removes if present and returns true if it made a change
+	if controllerutil.RemoveFinalizer(secret, secretFinalizerName) {
+		if err := r.Update(ctx, secret); err != nil {
+			return fmt.Errorf("failed to remove finalizer from secret: %w", err)
+		}
+		log.Info("Removed finalizer from vSphere credentials secret", "secret", credName, "namespace", credNamespace)
+	} else {
+		log.V(1).Info("Secret does not have finalizer", "secret", credName, "namespace", credNamespace)
+	}
+
+	return nil
 }

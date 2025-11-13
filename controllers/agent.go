@@ -79,6 +79,33 @@ func isAgentUnbindingOrUnbound(agent *unstructured.Unstructured) bool {
 	return false
 }
 
+// isAgentBound checks if an Agent is bound to a cluster
+func isAgentBound(agent *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(agent.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+
+	// Check if any condition has reason "Bound"
+	for _, condInterface := range conditions {
+		cond, ok := condInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		reason, found, err := unstructured.NestedString(cond, "reason")
+		if err != nil || !found {
+			continue
+		}
+
+		if reason == "Bound" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // getAgentNamespace retrieves the agent namespace from the HostedCluster resource
 // The HostedCluster is in the same namespace as the VMwareNodePoolTemplate
 func (r *VMwareNodePoolTemplateReconciler) getAgentNamespace(ctx context.Context, template *vmwarev1alpha1.VMwareNodePoolTemplate, log logr.Logger) (string, error) {
@@ -215,8 +242,8 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 
 		// Check if this Agent is unbinding/unbound AND was previously managed by us
 		// We need to distinguish between:
-		// 1. NEW agents with "Unbound" status (never bound, no labels/annotations/finalizer)
-		// 2. MANAGED agents with "Unbinding"/"Unbound" status (were bound, have our markers)
+		// 1. NEW agents with "Unbound" status (never bound, no binding label)
+		// 2. MANAGED agents with "Unbinding"/"Unbound" status (were bound, have binding label)
 		if isAgentUnbindingOrUnbound(agent) {
 			labels := agent.GetLabels()
 
@@ -224,15 +251,19 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			hasFinalizer := controllerutil.ContainsFinalizer(agent, agentFinalizerName)
 			managedBy := ""
 			nodePoolLabel := ""
+			bindingLabel := ""
 
 			if labels != nil {
 				managedBy = labels["vmware.hcp.open-cluster-management.io/managed-by"]
 				nodePoolLabel = labels["vmware.hcp.open-cluster-management.io/nodepool"]
+				bindingLabel = labels["vmware.hcp.open-cluster-management.io/binding"]
 			}
 
-			// Only delete if agent has our management markers (finalizer + managed-by label)
-			// This distinguishes managed agents being unbound from NEW agents that are simply unbound
-			if hasFinalizer && managedBy != "" {
+			// Only delete if agent has our management markers AND was previously bound
+			// The binding label is only added when agent is bound, so this distinguishes:
+			// - Agents that were bound and are now unbinding (has binding label) -> DELETE
+			// - New agents that are unbound but never bound (no binding label) -> KEEP
+			if hasFinalizer && managedBy != "" && bindingLabel != "" {
 				// Verify the agent was managed by this template
 				if managedBy != template.Name {
 					log.Info("Agent is unbinding but not managed by this template - skipping",
@@ -267,10 +298,11 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 				// Skip further processing for this agent
 				continue
 			} else {
-				// Agent is unbinding/unbound but doesn't have our markers
+				// Agent is unbinding/unbound but doesn't have binding label
 				// This is likely a NEW agent that was never bound - process it normally
-				log.V(1).Info("Agent has unbinding/unbound status but no management markers - treating as new agent",
-					"agent", agent.GetName(), "hasFinalizer", hasFinalizer, "managedBy", managedBy)
+				// (e.g., NodePool is being created or having issues, agent not yet bound)
+				log.V(1).Info("Agent has unbinding/unbound status but no binding label - treating as new agent",
+					"agent", agent.GetName(), "hasFinalizer", hasFinalizer, "managedBy", managedBy, "bindingLabel", bindingLabel)
 				// Fall through to normal processing
 			}
 		}
@@ -306,6 +338,33 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			if labels[nodePoolLabel] != nodePoolName {
 				labels[nodePoolLabel] = nodePoolName
 				needsUpdate = true
+			}
+
+			// Handle binding label - this label tracks if an agent was ever bound to a NodePool
+			// Once added, it persists even after unbinding, which helps distinguish:
+			// 1. New agents that are unbound (no binding label) - DON'T delete
+			// 2. Agents that were bound but are now unbinding (has binding label) - DELETE
+			bindingLabel := "vmware.hcp.open-cluster-management.io/binding"
+			existingBindingLabel := labels[bindingLabel]
+
+			// Add or preserve binding label
+			if existingBindingLabel == "" {
+				// No binding label yet - only add it when agent becomes bound
+				if isAgentBound(agent) {
+					labels[bindingLabel] = nodePoolName
+					needsUpdate = true
+					log.Info("Agent is bound, adding binding label", "agent", agent.GetName(), "nodepool", nodePoolName)
+				}
+			} else {
+				// Binding label already exists - preserve it (even if agent is now unbound)
+				// Update only if it points to wrong NodePool
+				if existingBindingLabel != nodePoolName {
+					labels[bindingLabel] = nodePoolName
+					needsUpdate = true
+					log.V(1).Info("Updating binding label to match current NodePool", "agent", agent.GetName(), "nodepool", nodePoolName)
+				}
+				// Note: We NEVER remove this label, even when agent unbinds
+				// This is critical for detecting which unbound agents should be deleted
 			}
 		}
 

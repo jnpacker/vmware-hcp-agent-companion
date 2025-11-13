@@ -300,7 +300,8 @@ spec:
                 format: int64
                 type: integer
               readyReplicas:
-                description: ReadyReplicas is the number of VMs that are ready
+                description: ReadyReplicas is the number of VMs that are ready (powered
+                  on)
                 format: int32
                 type: integer
               vmStatus:

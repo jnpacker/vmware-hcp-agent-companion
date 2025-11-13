@@ -102,6 +102,55 @@ func (r *VMwareNodePoolTemplateReconciler) getNodePool(ctx context.Context, temp
 	return nodePool, nil
 }
 
+// ensureNodePoolMatchLabels ensures that the NodePool has matchLabels configured
+// If matchLabels is not set, it will be populated with:
+// - The nodepool name label (vmware.hcp.open-cluster-management.io/nodepool)
+// - Any labels from the template's agentLabelSelector
+func (r *VMwareNodePoolTemplateReconciler) ensureNodePoolMatchLabels(
+	ctx context.Context,
+	nodePool *unstructured.Unstructured,
+	template *vmwarev1alpha1.VMwareNodePoolTemplate,
+	log logr.Logger,
+) error {
+	// Check if matchLabels already exists
+	matchLabels, found, err := unstructured.NestedMap(nodePool.Object, "spec", "platform", "agent", "agentLabelSelector", "matchLabels")
+	if err != nil {
+		return fmt.Errorf("failed to check matchLabels: %w", err)
+	}
+
+	// If matchLabels is already set, don't modify it
+	if found && len(matchLabels) > 0 {
+		log.V(1).Info("NodePool already has matchLabels configured, skipping update")
+		return nil
+	}
+
+	// Build the matchLabels map
+	newMatchLabels := make(map[string]interface{})
+
+	// Add the nodepool name label
+	nodePoolLabel := "vmware.hcp.open-cluster-management.io/nodepool"
+	nodePoolName := template.Spec.NodePoolRef.Name
+	newMatchLabels[nodePoolLabel] = nodePoolName
+
+	// Add any labels from the template's agentLabelSelector
+	for key, value := range template.Spec.AgentLabelSelector {
+		newMatchLabels[key] = value
+	}
+
+	// Set the matchLabels in the NodePool
+	if err := unstructured.SetNestedMap(nodePool.Object, newMatchLabels, "spec", "platform", "agent", "agentLabelSelector", "matchLabels"); err != nil {
+		return fmt.Errorf("failed to set matchLabels: %w", err)
+	}
+
+	// Update the NodePool
+	if err := r.Update(ctx, nodePool); err != nil {
+		return fmt.Errorf("failed to update NodePool with matchLabels: %w", err)
+	}
+
+	log.Info("Updated NodePool matchLabels", "nodePool", nodePool.GetName(), "matchLabels", newMatchLabels)
+	return nil
+}
+
 // setNodePoolRefAnnotation adds or updates the NodePool reference annotation on the template
 // This annotation tracks which NodePool is connected to this template for visibility
 func (r *VMwareNodePoolTemplateReconciler) setNodePoolRefAnnotation(

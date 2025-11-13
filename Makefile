@@ -19,9 +19,28 @@ all: build
 
 ##@ General
 
+.DEFAULT_GOAL := help
+
 .PHONY: help
-help: ## Display this help.
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+help: ## Display available make commands.
+	@echo "\nUsage: make <target>\n"
+	@echo "Development:"
+	@echo "  build              Build manager binary"
+	@echo "  run                Run controller from your host"
+	@echo "  test               Run tests with coverage"
+	@echo "  fmt                Run go fmt against code"
+	@echo "  vet                Run go vet against code"
+	@echo ""
+	@echo "Container:"
+	@echo "  podman-build       Build container image"
+	@echo "  podman-push        Push container image to registry"
+	@echo ""
+	@echo "Kubernetes:"
+	@echo "  install            Install CRDs into cluster"
+	@echo "  uninstall          Uninstall CRDs from cluster"
+	@echo "  deploy             Deploy controller to cluster"
+	@echo "  undeploy           Undeploy controller from cluster"
+	@echo ""
 
 ##@ Development
 
