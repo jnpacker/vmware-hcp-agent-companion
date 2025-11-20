@@ -543,16 +543,50 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgentFinalizer(ctx context.C
 					log.Info("VM not found (may already be deleted)", "vm", vmName, "agent", agentName)
 					vmDeleted = true // Treat as deleted if not found
 				} else {
-					if err := vClient.DestroyVM(ctx, vm); err != nil {
-						log.Error(err, "Failed to destroy VM - will remove finalizer anyway", "vm", vmName)
-					} else {
-						log.Info("Successfully deleted VM for agent", "vm", vmName, "agent", agentName)
-						vmDeleted = true
-						if !templateNotFound {
-							r.Recorder.Eventf(template, corev1.EventTypeNormal, "VMCleanedUp", "Cleaned up VM %s for deleted agent %s", vmName, agentName)
-							if r.Metrics != nil {
-								r.Metrics.RecordVMDeleted(template.Name, template.Namespace)
+					// Validate VM ownership before deletion
+					if !templateNotFound {
+						expectedOwner := fmt.Sprintf("%s/%s", template.Namespace, template.Name)
+						if err := vClient.ValidateVMOwnership(ctx, vm, expectedOwner); err != nil {
+							log.Error(err, "VM ownership validation failed - refusing to delete VM",
+								"vm", vmName,
+								"agent", agentName,
+								"expectedOwner", expectedOwner,
+								"template", template.Name,
+								"namespace", template.Namespace,
+								"details", "Check VM ExtraConfig in vCenter (VM Options > Advanced > Configuration Parameters > guestinfo.vmware-hcp.template)")
+							r.Recorder.Eventf(template, corev1.EventTypeWarning, "VMOwnershipValidationFailed",
+								"Refusing to delete VM %s for agent %s: %v. Check VM ownership tag in vCenter: VM Options > Advanced > Configuration Parameters > guestinfo.vmware-hcp.template",
+								vmName, agentName, err)
+							// Don't delete the VM, but remove finalizer to prevent blocking
+							// The VM will remain in vSphere for manual investigation
+						} else {
+							log.Info("VM ownership validated - proceeding with deletion",
+								"vm", vmName,
+								"agent", agentName,
+								"owner", expectedOwner,
+								"tag", "guestinfo.vmware-hcp.template")
+							if err := vClient.DestroyVM(ctx, vm); err != nil {
+								log.Error(err, "Failed to destroy VM - will remove finalizer anyway", "vm", vmName)
+							} else {
+								log.Info("Successfully deleted VM for agent", "vm", vmName, "agent", agentName)
+								vmDeleted = true
+								r.Recorder.Eventf(template, corev1.EventTypeNormal, "VMCleanedUp", "Cleaned up VM %s for deleted agent %s", vmName, agentName)
+								if r.Metrics != nil {
+									r.Metrics.RecordVMDeleted(template.Name, template.Namespace)
+								}
 							}
+						}
+					} else {
+						// Template was deleted - we can't validate ownership, but log warning
+						log.Info("Template was deleted - skipping ownership validation for VM cleanup",
+							"vm", vmName,
+							"agent", agentName,
+							"warning", "Unable to validate VM ownership since template is deleted")
+						if err := vClient.DestroyVM(ctx, vm); err != nil {
+							log.Error(err, "Failed to destroy VM - will remove finalizer anyway", "vm", vmName)
+						} else {
+							log.Info("Successfully deleted VM for agent (template was deleted)", "vm", vmName, "agent", agentName)
+							vmDeleted = true
 						}
 					}
 				}

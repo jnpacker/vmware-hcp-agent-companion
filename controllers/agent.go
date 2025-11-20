@@ -240,7 +240,41 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			log.V(1).Info("Found matching Agent for VM by UUID", "agent", agent.GetName(), "uuid", agentUUID)
 		}
 
-		// Check if this Agent is unbinding/unbound AND was previously managed by us
+		// CRITICAL: Add finalizer and management labels FIRST (before checking unbinding status)
+		// This ensures the finalizer exists before we try to delete an unbinding Agent
+		needsUpdate := false
+
+		// Add finalizer if not present
+		if !controllerutil.ContainsFinalizer(agent, agentFinalizerName) {
+			controllerutil.AddFinalizer(agent, agentFinalizerName)
+			needsUpdate = true
+			log.Info("Adding finalizer to Agent", "agent", agent.GetName(), "finalizer", agentFinalizerName)
+		}
+
+		// Add management labels if not present
+		labels := agent.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+
+		managedByLabel := labels["vmware.hcp.open-cluster-management.io/managed-by"]
+		if managedByLabel != template.Name {
+			labels["vmware.hcp.open-cluster-management.io/managed-by"] = template.Name
+			needsUpdate = true
+		}
+
+		// Update now if needed (before checking unbinding status)
+		if needsUpdate {
+			agent.SetLabels(labels)
+			if err := r.Update(ctx, agent); err != nil {
+				log.Error(err, "Failed to add finalizer and labels to Agent", "agent", agent.GetName())
+				continue // Skip this agent, try again on next reconciliation
+			}
+			log.Info("Added finalizer and management labels to Agent", "agent", agent.GetName())
+			// Don't continue here - proceed with the rest of the logic
+		}
+
+		// Now check if this Agent is unbinding/unbound AND was previously managed by us
 		// We need to distinguish between:
 		// 1. NEW agents with "Unbound" status (never bound, no binding label)
 		// 2. MANAGED agents with "Unbinding"/"Unbound" status (were bound, have binding label)
@@ -308,10 +342,12 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 		}
 
 		// Collect all updates in a single pass
-		needsUpdate := false
+		// Note: needsUpdate was declared earlier and may already be true from adding finalizer/labels
+		// Reset it here since we'll check all fields again
+		needsUpdate = false
 
 		// 1. Handle Labels
-		labels := agent.GetLabels()
+		labels = agent.GetLabels() // Re-fetch labels in case they were updated earlier
 		if labels == nil {
 			labels = make(map[string]string)
 		}
@@ -324,12 +360,8 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			}
 		}
 
-		// Add management label (always add for matching VMs)
-		managedByLabel := "vmware.hcp.open-cluster-management.io/managed-by"
-		if labels[managedByLabel] != template.Name {
-			labels[managedByLabel] = template.Name
-			needsUpdate = true
-		}
+		// Note: managed-by label was already added earlier (before unbinding check)
+		// No need to add it again here
 
 		// Add NodePool label if NodePool is referenced (always add for matching VMs)
 		if template.Spec.NodePoolRef != nil {
@@ -411,11 +443,8 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileAgents(ctx context.Context, 
 			needsUpdate = true
 		}
 
-		// 4. Handle Finalizer
-		if !controllerutil.ContainsFinalizer(agent, agentFinalizerName) {
-			controllerutil.AddFinalizer(agent, agentFinalizerName)
-			needsUpdate = true
-		}
+		// Note: Finalizer was already added earlier (before unbinding check)
+		// No need to add it again here
 
 		// Add annotations with VM deletion metadata (so we can clean up even if template is deleted)
 		annotations := agent.GetAnnotations()

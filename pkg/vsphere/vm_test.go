@@ -19,6 +19,9 @@ package vsphere
 
 import (
 	"testing"
+
+	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/types"
 )
 
 // TestVMSpecDefaults tests that VM spec defaults are properly set
@@ -499,4 +502,99 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestGetVMTag tests retrieving tags from VM ExtraConfig
+func TestGetVMTag(t *testing.T) {
+	tests := []struct {
+		name          string
+		vmInfo        *mo.VirtualMachine
+		key           string
+		expectedValue string
+	}{
+		{
+			name: "Tag exists",
+			vmInfo: &mo.VirtualMachine{
+				Config: &types.VirtualMachineConfigInfo{
+					ExtraConfig: []types.BaseOptionValue{
+						&types.OptionValue{
+							Key:   "guestinfo.vmware-hcp.template",
+							Value: "default/my-template",
+						},
+					},
+				},
+			},
+			key:           "template",
+			expectedValue: "default/my-template",
+		},
+		{
+			name: "Tag does not exist",
+			vmInfo: &mo.VirtualMachine{
+				Config: &types.VirtualMachineConfigInfo{
+					ExtraConfig: []types.BaseOptionValue{
+						&types.OptionValue{
+							Key:   "guestinfo.other-key",
+							Value: "other-value",
+						},
+					},
+				},
+			},
+			key:           "template",
+			expectedValue: "",
+		},
+		{
+			name: "Multiple tags - retrieve specific one",
+			vmInfo: &mo.VirtualMachine{
+				Config: &types.VirtualMachineConfigInfo{
+					ExtraConfig: []types.BaseOptionValue{
+						&types.OptionValue{
+							Key:   "guestinfo.vmware-hcp.template",
+							Value: "default/my-template",
+						},
+						&types.OptionValue{
+							Key:   "guestinfo.vmware-hcp.version",
+							Value: "v1",
+						},
+					},
+				},
+			},
+			key:           "version",
+			expectedValue: "v1",
+		},
+		{
+			name:          "Nil Config",
+			vmInfo:        &mo.VirtualMachine{Config: nil},
+			key:           "template",
+			expectedValue: "",
+		},
+		{
+			name: "Nil ExtraConfig",
+			vmInfo: &mo.VirtualMachine{
+				Config: &types.VirtualMachineConfigInfo{
+					ExtraConfig: nil,
+				},
+			},
+			key:           "template",
+			expectedValue: "",
+		},
+		{
+			name: "Empty ExtraConfig",
+			vmInfo: &mo.VirtualMachine{
+				Config: &types.VirtualMachineConfigInfo{
+					ExtraConfig: []types.BaseOptionValue{},
+				},
+			},
+			key:           "template",
+			expectedValue: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := GetVMTag(tt.vmInfo, tt.key)
+			if value != tt.expectedValue {
+				t.Errorf("Expected value %q, got %q", tt.expectedValue, value)
+			}
+		})
+	}
 }

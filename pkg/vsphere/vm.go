@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 
 	"github.com/vmware/govmomi/object"
@@ -299,15 +300,25 @@ func (c *Client) PowerOffVM(ctx context.Context, vm *object.VirtualMachine) erro
 }
 
 // DestroyVM destroys a virtual machine
+// IMPORTANT: Callers should validate VM ownership using ValidateVMOwnership before calling this method
 func (c *Client) DestroyVM(ctx context.Context, vm *object.VirtualMachine) error {
-	// Get power state
-	var props mo.VirtualMachine
-	if err := vm.Properties(ctx, vm.Reference(), []string{"runtime.powerState"}, &props); err != nil {
+	// Get VM info including power state and config for safety check
+	vmInfo, err := c.GetVMInfo(ctx, vm)
+	if err != nil {
 		return fmt.Errorf("failed to get VM properties: %w", err)
 	}
 
+	// Safety check: Warn if VM has no ownership tag (defense in depth)
+	// Note: This is a warning, not an error, because some legitimate use cases
+	// may involve VMs created before tagging was implemented
+	templateOwner := GetVMTag(vmInfo, "template")
+	if templateOwner == "" {
+		// Log to stderr since we don't have access to logger here
+		fmt.Fprintf(os.Stderr, "WARNING: Destroying VM %s without template ownership tag - ensure this is intentional\n", vmInfo.Name)
+	}
+
 	// Power off if running
-	if props.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
+	if vmInfo.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
 		if err := c.PowerOffVM(ctx, vm); err != nil {
 			return fmt.Errorf("failed to power off VM before deletion: %w", err)
 		}
@@ -406,6 +417,28 @@ func GetVMTag(vmInfo *mo.VirtualMachine, key string) string {
 		}
 	}
 	return ""
+}
+
+// ValidateVMOwnership validates that a VM belongs to the expected template
+// Returns error if the VM doesn't have the ownership tag or if it doesn't match
+func (c *Client) ValidateVMOwnership(ctx context.Context, vm *object.VirtualMachine, expectedOwner string) error {
+	vmInfo, err := c.GetVMInfo(ctx, vm)
+	if err != nil {
+		return fmt.Errorf("failed to get VM info for ownership validation: %w", err)
+	}
+
+	templateOwner := GetVMTag(vmInfo, "template")
+	if templateOwner == "" {
+		return fmt.Errorf("OWNERSHIP VALIDATION FAILED: VM %s (UUID: %s) has no template ownership tag (guestinfo.vmware-hcp.template) - refusing to modify VM for safety (expected: %s)",
+			vmInfo.Name, vmInfo.Config.Uuid, expectedOwner)
+	}
+
+	if templateOwner != expectedOwner {
+		return fmt.Errorf("OWNERSHIP VALIDATION FAILED: VM %s (UUID: %s) belongs to template '%s', not '%s' - refusing to modify VM for safety (tag: guestinfo.vmware-hcp.template)",
+			vmInfo.Name, vmInfo.Config.Uuid, templateOwner, expectedOwner)
+	}
+
+	return nil
 }
 
 // UploadISO uploads an ISO file to a datastore
