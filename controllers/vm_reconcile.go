@@ -189,20 +189,46 @@ func (r *VMwareNodePoolTemplateReconciler) getCurrentVMs(ctx context.Context, vC
 
 		// Check if VM name starts with our prefix
 		if len(info.Name) > len(prefix) && info.Name[:len(prefix)] == prefix {
-			// Check template ownership tag if it exists
+			// Check template ownership tag - REQUIRED for safety
 			templateOwner := vsphere.GetVMTag(info, "template")
 			expectedOwner := fmt.Sprintf("%s/%s", template.Namespace, template.Name)
 
-			// If tag exists and doesn't match, skip this VM
-			if templateOwner != "" && templateOwner != expectedOwner {
-				log.Info("Skipping VM - belongs to different template", "vm", info.Name, "expectedOwner", expectedOwner, "actualOwner", templateOwner)
+			// SAFETY: Reject VMs without ownership tags to prevent accidentally adopting VMs we don't own
+			if templateOwner == "" {
+				log.Info("OWNERSHIP MISMATCH: VM has no template ownership tag - refusing to manage this VM",
+					"vm", info.Name,
+					"vmUUID", info.Config.Uuid,
+					"expectedTag", "guestinfo.vmware-hcp.template",
+					"expectedValue", expectedOwner,
+					"actualValue", "<missing>",
+					"action", "skipping VM to prevent adopting unmanaged resources")
+				r.Recorder.Eventf(template, corev1.EventTypeWarning, "VMOwnershipMissing",
+					"VM %s (UUID: %s) has no ownership tag - refusing to manage (expected guestinfo.vmware-hcp.template=%s)",
+					info.Name, info.Config.Uuid, expectedOwner)
 				continue
 			}
 
-			// If no tag exists, log it but include the VM (it may be an existing VM from before tagging was added)
-			if templateOwner == "" {
-				log.V(1).Info("VM has no template ownership tag - assuming it belongs to this template", "vm", info.Name)
+			// If tag exists but doesn't match, skip this VM
+			if templateOwner != expectedOwner {
+				log.Info("OWNERSHIP MISMATCH: VM belongs to different template - refusing to manage this VM",
+					"vm", info.Name,
+					"vmUUID", info.Config.Uuid,
+					"expectedOwner", expectedOwner,
+					"actualOwner", templateOwner,
+					"tag", "guestinfo.vmware-hcp.template",
+					"action", "skipping VM to prevent cross-template interference")
+				r.Recorder.Eventf(template, corev1.EventTypeWarning, "VMOwnershipMismatch",
+					"VM %s (UUID: %s) belongs to template %s, not %s - refusing to manage",
+					info.Name, info.Config.Uuid, templateOwner, expectedOwner)
+				continue
 			}
+
+			// Ownership validated successfully
+			log.V(1).Info("VM ownership validated",
+				"vm", info.Name,
+				"vmUUID", info.Config.Uuid,
+				"owner", templateOwner,
+				"tag", "guestinfo.vmware-hcp.template")
 
 			vmInfo := VMInfo{
 				VM:           vm,
