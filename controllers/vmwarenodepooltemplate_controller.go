@@ -203,6 +203,14 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileNormal(ctx context.Context, 
 	template.SetCondition(vmwarev1alpha1.ConditionTypeVSphereConnected, metav1.ConditionTrue,
 		"Connected", "Successfully connected to vSphere")
 
+	// Poll for resource utilization (event-driven + periodic)
+	// This validates resources exist and tracks capacity
+	if err := r.reconcileResourceUtilization(ctx, vClient, template, log); err != nil {
+		// Don't fail reconciliation on resource polling errors, just log
+		// The status will show the last successful poll
+		log.Error(err, "Failed to poll resource utilization, continuing with reconciliation")
+	}
+
 	// Determine desired replica count
 	desiredReplicas := int32(0)
 	if template.Spec.TestMode {
@@ -767,6 +775,179 @@ func (r *VMwareNodePoolTemplateReconciler) removeSecretFinalizer(ctx context.Con
 	} else {
 		log.V(1).Info("Secret does not have finalizer", "secret", credName, "namespace", credNamespace)
 	}
+
+	return nil
+}
+
+// reconcileResourceUtilization queries vSphere for resource utilization and updates status
+// Returns true if resources should be polled (based on event-driven + periodic logic)
+func (r *VMwareNodePoolTemplateReconciler) shouldPollResources(template *vmwarev1alpha1.VMwareNodePoolTemplate) bool {
+	// Always poll if we've never polled before
+	if template.Status.ResourceUtilization == nil {
+		return true
+	}
+
+	// Get polling interval (default 5 minutes)
+	pollingInterval := 5 * time.Minute
+	if template.Spec.ResourcePollingInterval != nil {
+		pollingInterval = template.Spec.ResourcePollingInterval.Duration
+		// Enforce minimum of 1 minute
+		if pollingInterval < time.Minute {
+			pollingInterval = time.Minute
+		}
+	}
+
+	// Poll if enough time has passed since last update
+	timeSinceLastPoll := time.Since(template.Status.ResourceUtilization.LastUpdated.Time)
+	return timeSinceLastPoll >= pollingInterval
+}
+
+// reconcileResourceUtilization queries vSphere for resource utilization and validation
+func (r *VMwareNodePoolTemplateReconciler) reconcileResourceUtilization(
+	ctx context.Context,
+	vClient *vsphere.Client,
+	template *vmwarev1alpha1.VMwareNodePoolTemplate,
+	log logr.Logger,
+) error {
+	// Check if we should poll resources
+	if !r.shouldPollResources(template) {
+		log.V(1).Info("Skipping resource polling - not yet time",
+			"lastUpdated", template.Status.ResourceUtilization.LastUpdated.Time)
+		return nil
+	}
+
+	log.Info("Polling vSphere for resource utilization")
+
+	// Get resource utilization and validation
+	utilization, validation, err := vClient.GetResourceUtilization(ctx, template.Spec.VMTemplate, template.Spec.UseEffectiveCapacity)
+	if err != nil {
+		log.Error(err, "Failed to get resource utilization")
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesValidated, metav1.ConditionFalse,
+			"QueryFailed", fmt.Sprintf("Failed to query resources: %v", err))
+		r.Recorder.Event(template, corev1.EventTypeWarning, "ResourceQueryError", err.Error())
+		return err
+	}
+
+	// Update timestamp
+	utilization.LastUpdated = metav1.Now()
+
+	// Update status
+	template.Status.ResourceUtilization = utilization
+	template.Status.ResourceValidation = validation
+
+	// Set resource validation condition
+	allValid := validation.Datacenter.Exists && validation.Datastore.Exists && validation.Network.Exists
+	if validation.Cluster != nil {
+		allValid = allValid && validation.Cluster.Exists
+	}
+	if validation.ResourcePool != nil {
+		allValid = allValid && validation.ResourcePool.Exists
+	}
+	if validation.Folder != nil && !validation.Folder.Exists {
+		// Folder is optional and can be created, so just warn
+		log.Info("Folder does not exist but will be created", "folder", template.Spec.VMTemplate.Folder)
+	}
+
+	if allValid {
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesValidated, metav1.ConditionTrue,
+			"ResourcesValidated", "All vSphere resources exist and are accessible")
+	} else {
+		reasons := []string{}
+		if !validation.Datacenter.Exists {
+			reasons = append(reasons, fmt.Sprintf("Datacenter: %s", validation.Datacenter.Message))
+		}
+		if !validation.Datastore.Exists {
+			reasons = append(reasons, fmt.Sprintf("Datastore: %s", validation.Datastore.Message))
+		}
+		if !validation.Network.Exists {
+			reasons = append(reasons, fmt.Sprintf("Network: %s", validation.Network.Message))
+		}
+		if validation.Cluster != nil && !validation.Cluster.Exists {
+			reasons = append(reasons, fmt.Sprintf("Cluster: %s", validation.Cluster.Message))
+		}
+		if validation.ResourcePool != nil && !validation.ResourcePool.Exists {
+			reasons = append(reasons, fmt.Sprintf("ResourcePool: %s", validation.ResourcePool.Message))
+		}
+
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesValidated, metav1.ConditionFalse,
+			"ValidationFailed", fmt.Sprintf("Some resources are invalid: %v", reasons))
+		r.Recorder.Event(template, corev1.EventTypeWarning, "ResourceValidationFailed",
+			fmt.Sprintf("Some resources are invalid: %v", reasons))
+	}
+
+	// Set resource availability condition
+	// Warn if capacity is low (< 80% of desired replicas) or critically low (< desired replicas)
+	needed := template.Status.DesiredReplicas - template.Status.ReadyReplicas
+	if utilization.EstimatedVMCapacity >= template.Status.DesiredReplicas {
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesAvailable, metav1.ConditionTrue,
+			"SufficientResources",
+			fmt.Sprintf("Can create %d VMs (need %d)", utilization.EstimatedVMCapacity, needed))
+	} else if utilization.EstimatedVMCapacity == 0 {
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesAvailable, metav1.ConditionFalse,
+			"NoCapacity",
+			fmt.Sprintf("Cannot create any VMs - resources exhausted (need %d)", needed))
+		r.Recorder.Event(template, corev1.EventTypeWarning, "ResourcesExhausted",
+			fmt.Sprintf("Cannot create VMs - estimated capacity: %d, needed: %d",
+				utilization.EstimatedVMCapacity, needed))
+	} else {
+		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesAvailable, metav1.ConditionFalse,
+			"InsufficientResources",
+			fmt.Sprintf("Can only create %d VMs but need %d", utilization.EstimatedVMCapacity, needed))
+		r.Recorder.Event(template, corev1.EventTypeWarning, "InsufficientResources",
+			fmt.Sprintf("Insufficient resources - estimated capacity: %d, needed: %d",
+				utilization.EstimatedVMCapacity, needed))
+	}
+
+	// Record metrics
+	if r.Metrics != nil {
+		// Datastore metrics
+		r.Metrics.RecordDatastoreUtilization(
+			template.Name, template.Namespace, utilization.Datastore.Name,
+			utilization.Datastore.CapacityGB, utilization.Datastore.FreeSpaceGB,
+			utilization.Datastore.UsedGB, utilization.Datastore.PercentUsed,
+		)
+
+		// Compute metrics
+		r.Metrics.RecordComputeUtilization(
+			template.Name, template.Namespace,
+			utilization.Compute.ResourceType, utilization.Compute.Name,
+			utilization.Compute.CpuTotalMhz, utilization.Compute.CpuAvailableMhz,
+			utilization.Compute.CpuUsedMhz, utilization.Compute.CpuPercentUsed,
+			utilization.Compute.MemoryTotalMb, utilization.Compute.MemoryAvailableMb,
+			utilization.Compute.MemoryUsedMb, utilization.Compute.MemoryPercentUsed,
+		)
+
+		// Estimated VM capacity
+		r.Metrics.RecordEstimatedVMCapacity(template.Name, template.Namespace, utilization.EstimatedVMCapacity)
+
+		// Resource validation metrics
+		r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "datacenter",
+			template.Spec.VMTemplate.Datacenter, validation.Datacenter.Exists)
+		r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "datastore",
+			template.Spec.VMTemplate.Datastore, validation.Datastore.Exists)
+		r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "network",
+			template.Spec.VMTemplate.Network, validation.Network.Exists)
+
+		if validation.Cluster != nil {
+			r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "cluster",
+				template.Spec.VMTemplate.Cluster, validation.Cluster.Exists)
+		}
+		if validation.ResourcePool != nil {
+			r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "resourcepool",
+				template.Spec.VMTemplate.ResourcePool, validation.ResourcePool.Exists)
+		}
+		if validation.Folder != nil {
+			r.Metrics.RecordResourceValidation(template.Name, template.Namespace, "folder",
+				template.Spec.VMTemplate.Folder, validation.Folder.Exists)
+		}
+	}
+
+	log.Info("Resource utilization updated",
+		"estimatedCapacity", utilization.EstimatedVMCapacity,
+		"datastoreFreeGB", utilization.Datastore.FreeSpaceGB,
+		"cpuAvailableMhz", utilization.Compute.CpuAvailableMhz,
+		"memoryAvailableMb", utilization.Compute.MemoryAvailableMb,
+	)
 
 	return nil
 }

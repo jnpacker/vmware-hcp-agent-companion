@@ -27,6 +27,22 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.resourceUtilization.estimatedVMCapacity
+      name: Est. Capacity
+      priority: 1
+      type: integer
+    - jsonPath: .status.resourceUtilization.datastore.freeSpaceGB
+      name: Storage Free
+      priority: 1
+      type: string
+    - jsonPath: .status.resourceUtilization.compute.cpuPercentUsed
+      name: CPU Avail %
+      priority: 1
+      type: integer
+    - jsonPath: .status.resourceUtilization.compute.memoryPercentUsed
+      name: Mem Avail %
+      priority: 1
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -110,10 +126,25 @@ spec:
                   Ignored when NodePoolRef is specified (uses NodePool replica count instead).
                 format: int32
                 type: integer
+              resourcePollingInterval:
+                description: |-
+                  ResourcePollingInterval defines how often to poll vSphere for resource utilization.
+                  Format: duration string (e.g., "5m", "300s")
+                  Default: 5m (5 minutes)
+                  Minimum: 1m (1 minute)
+                type: string
               testMode:
                 description: |-
                   TestMode when true, creates VMs without requiring a NodePool.
                   Useful for validating vSphere connectivity and VM creation.
+                type: boolean
+              useEffectiveCapacity:
+                description: |-
+                  UseEffectiveCapacity determines whether to use effective capacity (after HA overhead)
+                  or total capacity when estimating VM capacity.
+                  - false (default): Use total capacity - used (simple calculation, no HA consideration)
+                  - true: Use effective capacity - used (accounts for HA/DRS overhead)
+                  Default: false
                 type: boolean
               vSphereCredentials:
                 description: |-
@@ -304,6 +335,206 @@ spec:
                   on)
                 format: int32
                 type: integer
+              resourceUtilization:
+                description: ResourceUtilization tracks vSphere resource availability
+                properties:
+                  compute:
+                    description: Compute resource utilization (Cluster or ResourcePool)
+                    properties:
+                      cpuAvailableMhz:
+                        format: int64
+                        type: integer
+                      cpuEffectiveMhz:
+                        format: int64
+                        type: integer
+                      cpuPercentUsed:
+                        format: int32
+                        type: integer
+                      cpuTotalMhz:
+                        description: CPU resources in MHz
+                        format: int64
+                        type: integer
+                      cpuUsedMhz:
+                        format: int64
+                        type: integer
+                      memoryAvailableMb:
+                        format: int64
+                        type: integer
+                      memoryEffectiveMb:
+                        format: int64
+                        type: integer
+                      memoryPercentUsed:
+                        format: int32
+                        type: integer
+                      memoryTotalMb:
+                        description: Memory resources in MB
+                        format: int64
+                        type: integer
+                      memoryUsedMb:
+                        format: int64
+                        type: integer
+                      name:
+                        description: Name of the compute resource (cluster or resource
+                          pool)
+                        type: string
+                      resourceType:
+                        description: ResourceType indicates whether this is from "Cluster"
+                          or "ResourcePool"
+                        type: string
+                    required:
+                    - cpuAvailableMhz
+                    - cpuEffectiveMhz
+                    - cpuPercentUsed
+                    - cpuTotalMhz
+                    - cpuUsedMhz
+                    - memoryAvailableMb
+                    - memoryEffectiveMb
+                    - memoryPercentUsed
+                    - memoryTotalMb
+                    - memoryUsedMb
+                    - name
+                    - resourceType
+                    type: object
+                  datastore:
+                    description: Datastore capacity information
+                    properties:
+                      capacityGB:
+                        description: CapacityGB is the total capacity in gigabytes
+                        format: int64
+                        type: integer
+                      freeSpaceGB:
+                        description: FreeSpaceGB is the available free space in gigabytes
+                        format: int64
+                        type: integer
+                      name:
+                        description: Name of the datastore
+                        type: string
+                      percentUsed:
+                        description: PercentUsed is the percentage of datastore capacity
+                          used (0-100)
+                        format: int32
+                        type: integer
+                      usedGB:
+                        description: UsedGB is the used space in gigabytes
+                        format: int64
+                        type: integer
+                    required:
+                    - capacityGB
+                    - freeSpaceGB
+                    - name
+                    - percentUsed
+                    - usedGB
+                    type: object
+                  estimatedVMCapacity:
+                    description: |-
+                      EstimatedVMCapacity is the estimated number of VMs that can be created
+                      based on available resources (minimum of CPU, memory, and storage constraints)
+                    format: int32
+                    type: integer
+                  lastUpdated:
+                    description: LastUpdated is when resource utilization was last
+                      queried
+                    format: date-time
+                    type: string
+                required:
+                - compute
+                - datastore
+                - estimatedVMCapacity
+                - lastUpdated
+                type: object
+              resourceValidation:
+                description: ResourceValidation tracks validation status of referenced
+                  resources
+                properties:
+                  cluster:
+                    description: Cluster validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                  datacenter:
+                    description: Datacenter validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                  datastore:
+                    description: Datastore validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                  folder:
+                    description: Folder validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                  network:
+                    description: Network validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                  resourcePool:
+                    description: ResourcePool validation status
+                    properties:
+                      exists:
+                        description: Exists indicates whether the resource exists
+                          and is accessible
+                        type: boolean
+                      message:
+                        description: Message provides additional information about
+                          the validation status
+                        type: string
+                    required:
+                    - exists
+                    type: object
+                required:
+                - datacenter
+                - datastore
+                - network
+                type: object
               vmStatus:
                 description: VMStatus contains status information for each VM
                 items:

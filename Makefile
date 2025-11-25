@@ -3,6 +3,9 @@ IMG ?= ${IMAGE_REGISTRY}/vmware-hcp-agent-companion:${IMAGE_TAG}
 IMAGE_REGISTRY ?= quay.io/jpacker
 IMAGE_TAG ?= 0.1
 
+# Kubernetes namespace for deployments
+NAMESPACE ?= multicluster-engine
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -75,12 +78,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
 .PHONY: podman-build
-podman-build: ## Build podman image with the manager.
+podman-build: ## Build podman image with the manager and update deployment image tag.
 	podman build -t ${IMG} .
 
 .PHONY: podman-push
-podman-push: ## Push podman image with the manager.
+podman-push: ## Push podman image with the manager and update image references.
 	podman push ${IMG}
+	sed -i 's|image: quay.io/jpacker/vmware-hcp-agent-companion:.*|image: ${IMG}|' config/manager/deployment.yaml
+	sed -i 's|newTag: ".*"|newTag: "${IMAGE_TAG}"|' config/manager/kustomization.yaml
 
 ##@ Deployment
 
@@ -93,12 +98,12 @@ uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube
 	kubectl delete -f config/crd/bases
 
 .PHONY: deploy
-deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && kubectl apply -k .
+deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config (namespace: $(NAMESPACE)).
+	cd config/manager && kubectl apply -k . --namespace=$(NAMESPACE)
 
 .PHONY: undeploy
-undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
-	cd config/manager && kubectl delete -k .
+undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config (namespace: $(NAMESPACE)).
+	cd config/manager && kubectl delete -k . --namespace=$(NAMESPACE)
 
 ##@ Build Dependencies
 
