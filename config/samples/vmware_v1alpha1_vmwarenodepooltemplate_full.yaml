@@ -63,3 +63,9 @@ spec:
 
   # Test mode (set to false when using nodePoolRef)
   testMode: false
+
+  # Resource management configuration
+  # resourcePollingInterval: 5m  # How often to poll vSphere for resource utilization (default: 5m)
+  # useEffectiveCapacity: false  # Use effective capacity for VM estimates (default: false)
+  #   - false: Use total capacity - used (simple, optimistic)
+  #   - true: Use effective capacity - used (accounts for HA overhead, conservative)

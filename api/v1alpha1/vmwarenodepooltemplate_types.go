@@ -51,6 +51,21 @@ type VMwareNodePoolTemplateSpec struct {
 	// Ignored when NodePoolRef is specified (uses NodePool replica count instead).
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// ResourcePollingInterval defines how often to poll vSphere for resource utilization.
+	// Format: duration string (e.g., "5m", "300s")
+	// Default: 5m (5 minutes)
+	// Minimum: 1m (1 minute)
+	// +optional
+	ResourcePollingInterval *metav1.Duration `json:"resourcePollingInterval,omitempty"`
+
+	// UseEffectiveCapacity determines whether to use effective capacity (after HA overhead)
+	// or total capacity when estimating VM capacity.
+	// - false (default): Use total capacity - used (simple calculation, no HA consideration)
+	// - true: Use effective capacity - used (accounts for HA/DRS overhead)
+	// Default: false
+	// +optional
+	UseEffectiveCapacity bool `json:"useEffectiveCapacity,omitempty"`
 }
 
 // NodePoolReference references a NodePool resource
@@ -188,6 +203,14 @@ type VMwareNodePoolTemplateStatus struct {
 
 	// ISOPath is the resolved path to the ISO in vSphere
 	ISOPath string `json:"isoPath,omitempty"`
+
+	// ResourceUtilization tracks vSphere resource availability
+	// +optional
+	ResourceUtilization *ResourceUtilization `json:"resourceUtilization,omitempty"`
+
+	// ResourceValidation tracks validation status of referenced resources
+	// +optional
+	ResourceValidation *ResourceValidation `json:"resourceValidation,omitempty"`
 }
 
 // VMStatus represents the status of a single VM
@@ -217,12 +240,107 @@ type VMStatus struct {
 	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
+// ResourceUtilization tracks vSphere resource availability and capacity
+type ResourceUtilization struct {
+	// Datastore capacity information
+	Datastore DatastoreUtilization `json:"datastore"`
+
+	// Compute resource utilization (Cluster or ResourcePool)
+	Compute ComputeUtilization `json:"compute"`
+
+	// EstimatedVMCapacity is the estimated number of VMs that can be created
+	// based on available resources (minimum of CPU, memory, and storage constraints)
+	EstimatedVMCapacity int32 `json:"estimatedVMCapacity"`
+
+	// LastUpdated is when resource utilization was last queried
+	LastUpdated metav1.Time `json:"lastUpdated"`
+}
+
+// DatastoreUtilization represents storage capacity information
+type DatastoreUtilization struct {
+	// Name of the datastore
+	Name string `json:"name"`
+
+	// CapacityGB is the total capacity in gigabytes
+	CapacityGB int64 `json:"capacityGB"`
+
+	// FreeSpaceGB is the available free space in gigabytes
+	FreeSpaceGB int64 `json:"freeSpaceGB"`
+
+	// UsedGB is the used space in gigabytes
+	UsedGB int64 `json:"usedGB"`
+
+	// PercentUsed is the percentage of datastore capacity used (0-100)
+	PercentUsed int32 `json:"percentUsed"`
+}
+
+// ComputeUtilization represents CPU and memory resource information
+type ComputeUtilization struct {
+	// ResourceType indicates whether this is from "Cluster" or "ResourcePool"
+	ResourceType string `json:"resourceType"`
+
+	// Name of the compute resource (cluster or resource pool)
+	Name string `json:"name"`
+
+	// CPU resources in MHz
+	CpuTotalMhz     int64 `json:"cpuTotalMhz"`     // Total CPU capacity
+	CpuEffectiveMhz int64 `json:"cpuEffectiveMhz"` // Effective CPU after HA/DRS overhead (cluster only)
+	CpuUsedMhz      int64 `json:"cpuUsedMhz"`      // Actual CPU usage
+	CpuAvailableMhz int64 `json:"cpuAvailableMhz"` // Available = Total - Used (matches percent calculation)
+	CpuPercentUsed  int32 `json:"cpuPercentUsed"`  // Percent used relative to total
+
+	// Memory resources in MB
+	MemoryTotalMb     int64 `json:"memoryTotalMb"`     // Total memory capacity
+	MemoryEffectiveMb int64 `json:"memoryEffectiveMb"` // Effective memory after HA/DRS overhead (cluster only)
+	MemoryUsedMb      int64 `json:"memoryUsedMb"`      // Actual memory usage
+	MemoryAvailableMb int64 `json:"memoryAvailableMb"` // Available = Total - Used (matches percent calculation)
+	MemoryPercentUsed int32 `json:"memoryPercentUsed"` // Percent used relative to total
+}
+
+// ResourceValidation tracks validation status of vSphere resources
+type ResourceValidation struct {
+	// Datacenter validation status
+	Datacenter ResourceValidationStatus `json:"datacenter"`
+
+	// Cluster validation status
+	// +optional
+	Cluster *ResourceValidationStatus `json:"cluster,omitempty"`
+
+	// ResourcePool validation status
+	// +optional
+	ResourcePool *ResourceValidationStatus `json:"resourcePool,omitempty"`
+
+	// Datastore validation status
+	Datastore ResourceValidationStatus `json:"datastore"`
+
+	// Network validation status
+	Network ResourceValidationStatus `json:"network"`
+
+	// Folder validation status
+	// +optional
+	Folder *ResourceValidationStatus `json:"folder,omitempty"`
+}
+
+// ResourceValidationStatus represents the validation status of a single resource
+type ResourceValidationStatus struct {
+	// Exists indicates whether the resource exists and is accessible
+	Exists bool `json:"exists"`
+
+	// Message provides additional information about the validation status
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=vmtemplate;vmtpl
 // +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.status.desiredReplicas`
 // +kubebuilder:printcolumn:name="Current",type=integer,JSONPath=`.status.currentReplicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Est. Capacity",type=integer,JSONPath=`.status.resourceUtilization.estimatedVMCapacity`,priority=1
+// +kubebuilder:printcolumn:name="Storage Free",type=string,JSONPath=`.status.resourceUtilization.datastore.freeSpaceGB`,priority=1
+// +kubebuilder:printcolumn:name="CPU Avail %",type=integer,JSONPath=`.status.resourceUtilization.compute.cpuPercentUsed`,priority=1
+// +kubebuilder:printcolumn:name="Mem Avail %",type=integer,JSONPath=`.status.resourceUtilization.compute.memoryPercentUsed`,priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // VMwareNodePoolTemplate is the Schema for the vmwarenodepooltemplates API
@@ -263,6 +381,12 @@ const (
 
 	// ConditionTypeVMsCreated indicates VMs are being created
 	ConditionTypeVMsCreated = "VMsCreated"
+
+	// ConditionTypeResourcesValidated indicates all vSphere resources exist and are accessible
+	ConditionTypeResourcesValidated = "ResourcesValidated"
+
+	// ConditionTypeResourcesAvailable indicates sufficient resources are available for requested VMs
+	ConditionTypeResourcesAvailable = "ResourcesAvailable"
 )
 
 // Helper methods for setting conditions
