@@ -18,6 +18,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -66,6 +68,12 @@ type VMwareNodePoolTemplateSpec struct {
 	// Default: false
 	// +optional
 	UseEffectiveCapacity bool `json:"useEffectiveCapacity,omitempty"`
+
+	// Quota defines limits on VM creation by this template.
+	// These limits constrain how many VMs can be created, regardless of
+	// the desired replica count from the NodePool or test mode replicas.
+	// +optional
+	Quota *VMQuota `json:"quota,omitempty"`
 }
 
 // NodePoolReference references a NodePool resource
@@ -151,6 +159,27 @@ type AdvancedVMConfig struct {
 	// Default: true
 	// +optional
 	NestedVirtualization *bool `json:"nestedVirtualization,omitempty"`
+}
+
+// VMQuota defines quota limits on VM creation by this template.
+// These are policy constraints that limit how many VMs can be created,
+// independent of the desired replica count from the NodePool.
+// Total storage consumption is calculated as: MaxVms × DiskSizeGB
+type VMQuota struct {
+	// MaxVms is the hard limit on the number of VMs this template can create.
+	// VM creation will be blocked when this limit is reached, even if the
+	// NodePool requests more replicas.
+	// This prevents operational issues from managing too many VMs and provides
+	// storage quota enforcement (as vSphere Resource Pools do not limit storage).
+	// +optional
+	MaxVms *int32 `json:"maxVms,omitempty"`
+
+	// SoftMaxVms is a soft limit that triggers a warning condition when
+	// EstimatedVMCapacity falls below this value. Does not block VM creation.
+	// Useful for capacity planning and proactive alerting before hitting hard limits.
+	// Must be less than or equal to MaxVms if both are specified.
+	// +optional
+	SoftMaxVms *int32 `json:"softMaxVms,omitempty"`
 }
 
 // AgentISOSpec defines how the Agent ISO is provided
@@ -387,6 +416,9 @@ const (
 
 	// ConditionTypeResourcesAvailable indicates sufficient resources are available for requested VMs
 	ConditionTypeResourcesAvailable = "ResourcesAvailable"
+
+	// ConditionTypeQuotaAvailable indicates whether quota limits allow creating more VMs
+	ConditionTypeQuotaAvailable = "QuotaAvailable"
 )
 
 // Helper methods for setting conditions
@@ -423,4 +455,37 @@ func (t *VMwareNodePoolTemplate) GetCondition(conditionType string) *metav1.Cond
 		}
 	}
 	return nil
+}
+
+// Validate validates the VMQuota configuration
+func (q *VMQuota) Validate() error {
+	if q == nil {
+		return nil
+	}
+
+	// Validate SoftMaxVms <= MaxVms
+	if q.SoftMaxVms != nil && q.MaxVms != nil {
+		if *q.SoftMaxVms > *q.MaxVms {
+			return fmt.Errorf("softMaxVms (%d) cannot exceed maxVms (%d)", *q.SoftMaxVms, *q.MaxVms)
+		}
+	}
+
+	// Validate positive values
+	if q.MaxVms != nil && *q.MaxVms <= 0 {
+		return fmt.Errorf("maxVms must be greater than 0")
+	}
+
+	if q.SoftMaxVms != nil && *q.SoftMaxVms <= 0 {
+		return fmt.Errorf("softMaxVms must be greater than 0")
+	}
+
+	return nil
+}
+
+// IsMaxVmsReached checks if the current VM count has reached the hard limit
+func (q *VMQuota) IsMaxVmsReached(currentVMs int32) bool {
+	if q == nil || q.MaxVms == nil {
+		return false
+	}
+	return currentVMs >= *q.MaxVms
 }

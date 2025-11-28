@@ -11,4 +11,4 @@ resources:
 images:
 - name: vmware-hcp-agent-companion
   newName: quay.io/jpacker/vmware-hcp-agent-companion
-  newTag: "0.5.4"
+  newTag: "0.5.9"

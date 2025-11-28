@@ -17,7 +17,7 @@ spec:
       serviceAccountName: vmware-nodepool-controller
       containers:
       - name: manager
-        image: quay.io/jpacker/vmware-hcp-agent-companion:0.5.4
+        image: quay.io/jpacker/vmware-hcp-agent-companion:0.5.9
         imagePullPolicy: Always
         command:
         - /manager

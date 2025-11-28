@@ -875,9 +875,41 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileResourceUtilization(
 			fmt.Sprintf("Some resources are invalid: %v", reasons))
 	}
 
-	// Set resource availability condition
-	// Warn if capacity is low (< 80% of desired replicas) or critically low (< desired replicas)
+	// Set quota availability condition
 	needed := template.Status.DesiredReplicas - template.Status.ReadyReplicas
+	if template.Spec.Quota != nil {
+		// Check hard limit
+		if template.Spec.Quota.IsMaxVmsReached(template.Status.CurrentReplicas) {
+			maxVms := *template.Spec.Quota.MaxVms
+			template.SetCondition(vmwarev1alpha1.ConditionTypeQuotaAvailable, metav1.ConditionFalse,
+				"MaxVmsReached",
+				fmt.Sprintf("Maximum VM quota reached (%d/%d)", template.Status.CurrentReplicas, maxVms))
+		} else if template.Spec.Quota.SoftMaxVms != nil && template.Status.DesiredReplicas >= *template.Spec.Quota.SoftMaxVms {
+			// Check soft limit (approaching quota)
+			softMaxVms := *template.Spec.Quota.SoftMaxVms
+			maxVms := int32(0)
+			if template.Spec.Quota.MaxVms != nil {
+				maxVms = *template.Spec.Quota.MaxVms
+			}
+			template.SetCondition(vmwarev1alpha1.ConditionTypeQuotaAvailable, metav1.ConditionFalse,
+				"ApproachingQuota",
+				fmt.Sprintf("Desired VMs (%d) approaching quota limit (soft: %d, max: %d)", template.Status.DesiredReplicas, softMaxVms, maxVms))
+			r.Recorder.Eventf(template, corev1.EventTypeWarning, "ApproachingQuota",
+				"Desired VMs (%d) approaching quota limit (soft: %d, max: %d) - consider increasing quota",
+				template.Status.DesiredReplicas, softMaxVms, maxVms)
+		} else {
+			template.SetCondition(vmwarev1alpha1.ConditionTypeQuotaAvailable, metav1.ConditionTrue,
+				"WithinQuota",
+				fmt.Sprintf("VM count (%d/%d desired) within quota limits", template.Status.CurrentReplicas, template.Status.DesiredReplicas))
+		}
+	} else {
+		// No quota configured
+		template.SetCondition(vmwarev1alpha1.ConditionTypeQuotaAvailable, metav1.ConditionTrue,
+			"NoQuotaConfigured",
+			"No quota limits configured")
+	}
+
+	// Set resource availability condition (infrastructure capacity)
 	if utilization.EstimatedVMCapacity >= template.Status.DesiredReplicas {
 		template.SetCondition(vmwarev1alpha1.ConditionTypeResourcesAvailable, metav1.ConditionTrue,
 			"SufficientResources",
