@@ -120,6 +120,30 @@ spec:
                 required:
                 - name
                 type: object
+              quota:
+                description: |-
+                  Quota defines limits on VM creation by this template.
+                  These limits constrain how many VMs can be created, regardless of
+                  the desired replica count from the NodePool or test mode replicas.
+                properties:
+                  maxVms:
+                    description: |-
+                      MaxVms is the hard limit on the number of VMs this template can create.
+                      VM creation will be blocked when this limit is reached, even if the
+                      NodePool requests more replicas.
+                      This prevents operational issues from managing too many VMs and provides
+                      storage quota enforcement (as vSphere Resource Pools do not limit storage).
+                    format: int32
+                    type: integer
+                  softMaxVms:
+                    description: |-
+                      SoftMaxVms is a soft limit that triggers a warning condition when
+                      EstimatedVMCapacity falls below this value. Does not block VM creation.
+                      Useful for capacity planning and proactive alerting before hitting hard limits.
+                      Must be less than or equal to MaxVms if both are specified.
+                    format: int32
+                    type: integer
+                type: object
               replicas:
                 description: |-
                   Replicas defines the number of VMs to create in test mode.

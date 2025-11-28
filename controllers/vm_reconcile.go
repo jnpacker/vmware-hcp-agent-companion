@@ -48,6 +48,38 @@ func (r *VMwareNodePoolTemplateReconciler) reconcileVMs(ctx context.Context, vCl
 	diff := desiredReplicas - currentReplicas
 
 	if diff > 0 {
+		// Check if MaxVms hard limit is reached
+		if template.Spec.Quota != nil && template.Spec.Quota.IsMaxVmsReached(currentReplicas) {
+			maxVms := *template.Spec.Quota.MaxVms
+			log.Info("MaxVms limit reached - cannot create more VMs",
+				"currentVMs", currentReplicas,
+				"maxVms", maxVms,
+				"desired", desiredReplicas)
+			template.SetCondition(vmwarev1alpha1.ConditionTypeQuotaAvailable, metav1.ConditionFalse,
+				"MaxVmsReached",
+				fmt.Sprintf("Maximum VM quota reached (%d/%d) - cannot create more VMs", currentReplicas, maxVms))
+			r.Recorder.Eventf(template, corev1.EventTypeWarning, "MaxVmsReached",
+				"Cannot create more VMs - maximum quota limit reached (%d/%d)", currentReplicas, maxVms)
+			return nil // Don't fail reconciliation, just skip VM creation
+		}
+
+		// Adjust diff if it would exceed MaxVms
+		if template.Spec.Quota != nil && template.Spec.Quota.MaxVms != nil {
+			maxVms := *template.Spec.Quota.MaxVms
+			if currentReplicas+diff > maxVms {
+				originalDiff := diff
+				diff = maxVms - currentReplicas
+				log.Info("Adjusting VM creation to respect MaxVms limit",
+					"currentVMs", currentReplicas,
+					"requested", originalDiff,
+					"adjusted", diff,
+					"maxVms", maxVms)
+				r.Recorder.Eventf(template, corev1.EventTypeWarning, "MaxVmsLimitAdjusted",
+					"Adjusted VM creation from %d to %d to respect MaxVms limit (%d)",
+					originalDiff, diff, maxVms)
+			}
+		}
+
 		// Scale up - prepare ISO before creating VMs
 		log.Info("Scaling up VMs", "current", currentReplicas, "desired", desiredReplicas, "toCreate", diff)
 		r.Recorder.Eventf(template, corev1.EventTypeNormal, "ScalingUp", "Creating %d new VMs", diff)
